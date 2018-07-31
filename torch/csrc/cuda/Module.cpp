@@ -7,6 +7,7 @@
 #include <sstream>
 #include <TH/TH.h>
 #include <ATen/ATen.h>
+#include <ATen/Context.h> /* Added by Franky */
 #include "ATen/cuda/CUDAContext.h"
 #include <THC/THCCachingAllocator.h>
 #ifdef USE_NCCL
@@ -267,6 +268,34 @@ PyObject * THCPModule_maxMemoryAllocated(PyObject *_unused, PyObject *arg)
   END_HANDLE_TH_ERRORS
 }
 
+/* Added by Franky */
+PyObject * THCPModule_gpuMemoryInfo(PyObject *_unused, PyObject *arg)
+{
+  HANDLE_TH_ERRORS
+  THPUtils_assert(THPUtils_checkLong(arg), "invalid argument to gpu_memory_info");
+  int type_of_mem = (int) THPUtils_unpackLong(arg);
+  THCState *state = at::globalContext().lazyInitCUDA();
+  size_t free_gpu_mem = 0;
+  size_t total_gpu_mem = 0;
+  size_t max_block_size = 0;
+  THCudaCheck(THCudaMemGetInfoCached(state, &free_gpu_mem, &total_gpu_mem, &max_block_size));
+
+  size_t mem_to_return = 0;
+  if (type_of_mem == 0) {
+    /* Total in use (in bytes) */
+    mem_to_return = total_gpu_mem - free_gpu_mem;
+  }
+  else if (type_of_mem == 1) {
+    mem_to_return = total_gpu_mem;
+  }
+  else {
+    std::cerr << "type_mem must be 0 or 1" << std::endl;
+  }
+
+  return PyLong_FromSize_t(mem_to_return);
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject * THCPModule_memoryCached(PyObject *_unused, PyObject *arg)
 {
   HANDLE_TH_ERRORS
@@ -384,6 +413,7 @@ PyObject * THCPModule_getCurrentBlasHandle_wrap(PyObject *self)
   END_HANDLE_TH_ERRORS
 }
 
+/* Annotated by Franky */
 static struct PyMethodDef _THCPModule_methods[] = {
   {"_cuda_init",        (PyCFunction)THCPModule_initExtension,    METH_NOARGS,  NULL},
   {"_cuda_setDevice",   (PyCFunction)THCPModule_setDevice_wrap,   METH_O,       NULL},
@@ -402,6 +432,7 @@ static struct PyMethodDef _THCPModule_methods[] = {
   {"_cuda_maxMemoryAllocated", (PyCFunction) THCPModule_maxMemoryAllocated, METH_O,  NULL},
   {"_cuda_memoryCached", (PyCFunction) THCPModule_memoryCached, METH_O,  NULL},
   {"_cuda_maxMemoryCached", (PyCFunction) THCPModule_maxMemoryCached, METH_O,  NULL},
+  {"_cuda_gpuMemoryInfo", (PyCFunction) THCPModule_gpuMemoryInfo, METH_O,       NULL},
   {"_cuda_manualSeed",  (PyCFunction)THCPModule_manualSeed,       METH_O,       NULL},
   {"_cuda_manualSeedAll", (PyCFunction)THCPModule_manualSeedAll,  METH_O,       NULL},
   {"_cuda_seed",        (PyCFunction)THCPModule_seed,             METH_NOARGS,  NULL},
