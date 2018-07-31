@@ -364,6 +364,19 @@ def empty_cache():
     if _initialized:
         torch._C._cuda_emptyCache()
 
+def gpu_memory_info(type_mem=None):
+    r"""Get current GPU global memory usage
+
+    Arguments:
+      type_mem (int, optional): If 0, returns current GPU global memory
+                                being used, in bytes. If 1, returns total
+                                amount of GPU memory available.
+                                Default is current GPU global memory (0).
+    """
+    _lazy_init()
+    if type_mem is None:
+      type_mem = 0
+    return torch._C._cuda_gpuMemoryInfo(type_mem)
 
 def memory_allocated(device=None):
     r"""Returns the current GPU memory usage by tensors in bytes for a given
