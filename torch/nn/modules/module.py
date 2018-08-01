@@ -241,6 +241,30 @@ class Module(object):
         fn(self)
         return self
 
+    # Select which GPU to use.
+    # Currently only based on memory, will expand to compute
+    def __select_gpu(self):
+      num_avail = torch._C._cuda_getDeviceCount()
+
+      # If only one device, leave as is 
+      if num_avail == 1:
+        return 0
+
+      # Track how much memory is being used on each device
+      mem_per_device = [0.0] * num_avail
+
+      for m in range(num_avail):
+        curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
+        mem_per_device[m] = curr_mem_alloc
+        #print("Device: %d, Curr Mem: %d" %(m, curr_mem_alloc))
+
+      # Set to minimum
+      min_device = mem_per_device.index(min(mem_per_device))
+      torch._C._cuda_setDevice(min_device)
+
+      print("Running on: %d" % min_device)
+      return min_device
+
     def cuda(self, device=None):
         r"""Moves all model parameters and buffers to the GPU.
 
@@ -255,6 +279,10 @@ class Module(object):
         Returns:
             Module: self
         """
+
+        if device is None:
+          device = self.__select_gpu()
+
         return self._apply(lambda t: t.cuda(device))
 
     def cpu(self):
