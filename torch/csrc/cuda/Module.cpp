@@ -7,7 +7,6 @@
 #include <sstream>
 #include <TH/TH.h>
 #include <ATen/ATen.h>
-#include <ATen/Context.h> /* Added by Franky */
 #include "ATen/cuda/CUDAContext.h"
 #include <THC/THCCachingAllocator.h>
 #ifdef USE_NCCL
@@ -28,7 +27,6 @@ THCState *state;
 ////////////////////////////////////////////////////////////////////////////////
 // CUDA management methods
 ////////////////////////////////////////////////////////////////////////////////
-
 void THCPModule_setDevice(int device)
 {
   THCudaCheck(cudaSetDevice(device));
@@ -273,26 +271,23 @@ PyObject * THCPModule_gpuMemoryInfo(PyObject *_unused, PyObject *arg)
 {
   HANDLE_TH_ERRORS
   THPUtils_assert(THPUtils_checkLong(arg), "invalid argument to gpu_memory_info");
-  int type_of_mem = (int) THPUtils_unpackLong(arg);
-  THCState *state = at::globalContext().lazyInitCUDA();
-  size_t free_gpu_mem = 0;
-  size_t total_gpu_mem = 0;
-  size_t max_block_size = 0;
-  THCudaCheck(THCudaMemGetInfoCached(state, &free_gpu_mem, &total_gpu_mem, &max_block_size));
+  int64_t desired_device = THPUtils_unpackLong(arg);
 
-  size_t mem_to_return = 0;
-  if (type_of_mem == 0) {
-    /* Total in use (in bytes) */
-    mem_to_return = total_gpu_mem - free_gpu_mem;
-  }
-  else if (type_of_mem == 1) {
-    mem_to_return = total_gpu_mem;
-  }
-  else {
-    std::cerr << "type_mem must be 0 or 1" << std::endl;
-  }
+  int current_device;
+  THCudaCheck(cudaGetDevice(&current_device));
 
-  return PyLong_FromSize_t(mem_to_return);
+  THCudaCheck(cudaSetDevice(desired_device));
+
+  size_t gpu_free = 0;
+  size_t gpu_total = 0;
+  THCudaCheck(cudaMemGetInfo(&gpu_free, &gpu_total));
+  size_t used_mem = gpu_total - gpu_free;
+
+  /* Set back to current device */
+  THCudaCheck(cudaDeviceReset());
+  THCudaCheck(cudaSetDevice(current_device));
+
+  return PyLong_FromSize_t(used_mem);
   END_HANDLE_TH_ERRORS
 }
 
