@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import functools
 import itertools
+import numpy as np
 
 import torch
 from ..backends.thnn import backend as thnn_backend
@@ -14,6 +15,8 @@ all_points = {'DenseNet201'   : {4 : 2275, 8 : 3109, 16 : 4699, 32 : 7839, 64 : 
               'VGG19'         : {4 : 2763, 8 : 2775, 16 : 4721, 32 : 7475, 64 : 8197},
               'ResNet50'      : {4 : 1799, 8 : 2149, 16 : 2837, 32 : 4139, 64 : 6737},
               'SqueezeNet1_1' : {4 : 936,  8 : 1156, 16 : 1318, 32 : 1636, 64 : 2314}}
+
+poss_batch = [4, 8, 16, 32, 64]
 
 def _addindent(s_, numSpaces):
     s = s_.split('\n')
@@ -259,6 +262,7 @@ class Module(object):
 
       # If only one device, leave as is 
       if num_avail == 1:
+        print("Running on: %d" % min_device)
         return 0
 
       # Define different functions that can be used to decide how to select
@@ -273,9 +277,9 @@ class Module(object):
           mem_per_device[m] = curr_mem_alloc
           #print("Device: %d, Curr Mem: %dMiB" %(m, curr_mem_alloc*9.5e-7))
 
-        return mem_per_device
+        return mem_per_device.index(min(mem_per_device))
 
-      def best_fit(self, batch_size, num_avail):
+      def best_fit_static(self, batch_size, num_avail):
         mem_per_device = [0.0] * num_avail
 
         for m in range(num_avail):
@@ -285,21 +289,39 @@ class Module(object):
           mem_per_device[m] = curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem
           #print("Device: %d, ModBSize: %d, Curr Mem: %dMiB, Total: %d" %(m, curr_mod_bsize_mem, curr_mem_alloc*9.5e-7, curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem))
 
-        return mem_per_device
+        return mem_per_device.index(min(mem_per_device))
+
+      def best_fit_batch(self, num_avail):
+        mem_per_device = np.zeros((num_avail, len(poss_batch)), dtype=int)
+
+        for m in range(num_avail):
+          for n, b in enumerate(poss_batch):
+            curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
+            # TODO: error check!!
+            curr_mod_bsize_mem = (all_points[self._name])[b]
+            mem_per_device[m, n] = curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem
+
+        min_tup = np.unravel_index(mem_per_device.argmin(), mem_per_device.shape)
+
+        return np.asscalar(min_tup[0]), poss_batch[min_tup[1]]
 
       # Track how much memory is being used on each device
+      min_device = -1
       mem_per_device = None
-      if batch_size == -1:
-        mem_per_device = least_memory(num_avail)
+      opt_bsize = -1
+      if batch_size == -2:
+        min_device = least_memory(num_avail)
+      elif batch_size == -1:
+        min_device, opt_bsize = best_fit_batch(self, num_avail)
       else:
-        mem_per_device = best_fit(self, batch_size, num_avail)
+        min_device = best_fit_static(self, batch_size, num_avail)
+        opt_bsize = batch_size
 
       # Set to minimum
-      min_device = mem_per_device.index(min(mem_per_device))
       torch._C._cuda_setDevice(min_device)
 
-      print("Running on: %d" % min_device)
-      return min_device
+      print("Running on: %d; Optimal Batch Size: %d" % (min_device, opt_bsize))
+      return min_device, opt_bsize
 
     def cuda(self, device=None, batch_size=-1):
         r"""Moves all model parameters and buffers to the GPU.
@@ -309,18 +331,25 @@ class Module(object):
         live on GPU while being optimized.
 
         Arguments:
-            device (int, optional): if specified, all parameters will be
-                copied to that device
+            device (int, optional):
+              None: first available device (the default)
+              -1: select using our scheduler
+            batch_size (int, optional):
+              -2: ignore batch size completely; use current GPU memory to decide
+              -1: select based on optimal batch size, and return
+                  the optimal batch size
+              else: use passed batch size
 
         Returns:
             Module: self
             Optimal Batch Size: o_bsize
+        NOTE: o_bsize will be -1 if batch_size was not -1, and can therefore be ignored
         """
+        opt_bsize = -1
+        if device == -1:
+          device, opt_bsize = self.__select_gpu(batch_size)
 
-        if device is None:
-          device = self.__select_gpu(batch_size)
-
-        return self._apply(lambda t: t.cuda(device))
+        return self._apply(lambda t: t.cuda(device)), opt_bsize
 
     def cpu(self):
         r"""Moves all model parameters and buffers to the CPU.
