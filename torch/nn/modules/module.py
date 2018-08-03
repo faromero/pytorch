@@ -7,6 +7,13 @@ from ..backends.thnn import backend as thnn_backend
 from ..parameter import Parameter
 import torch.utils.hooks as hooks
 
+# Hardcoded values of memory usage
+# Eventually need to create a fitting that gives us this value
+# based on some prior datapoints
+all_points = {'DenseNet201'   : {4 : 2275, 8 : 3109, 16 : 4699, 32 : 7839, 64 : 14133},
+              'VGG19'         : {4 : 2763, 8 : 2775, 16 : 4721, 32 : 7475, 64 : 8197},
+              'ResNet50'      : {4 : 1799, 8 : 2149, 16 : 2837, 32 : 4139, 64 : 6737},
+              'SqueezeNet1_1' : {4 : 936,  8 : 1156, 16 : 1318, 32 : 1636, 64 : 2314}}
 
 def _addindent(s_, numSpaces):
     s = s_.split('\n')
@@ -59,7 +66,7 @@ class Module(object):
     the change."""
     _version = 1
 
-    def __init__(self):
+    def __init__(self, name='NoName'):
         self._backend = thnn_backend
         self._parameters = OrderedDict()
         self._buffers = OrderedDict()
@@ -68,6 +75,7 @@ class Module(object):
         self._forward_pre_hooks = OrderedDict()
         self._modules = OrderedDict()
         self.training = True
+        self._name = name
 
     def forward(self, *input):
         r"""Defines the computation performed at every call.
@@ -242,21 +250,49 @@ class Module(object):
         return self
 
     # Select which GPU to use.
+    # Add logic to check whether memory will be exceeded, and if so,
+    # force model to wait...
+
     # Currently only based on memory, will expand to compute
-    def __select_gpu(self):
+    def __select_gpu(self, batch_size):
       num_avail = torch._C._cuda_getDeviceCount()
 
       # If only one device, leave as is 
       if num_avail == 1:
         return 0
 
-      # Track how much memory is being used on each device
-      mem_per_device = [0.0] * num_avail
+      # Define different functions that can be used to decide how to select
+      # a GPU
 
-      for m in range(num_avail):
-        curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
-        mem_per_device[m] = curr_mem_alloc
-        #print("Device: %d, Curr Mem: %d" %(m, curr_mem_alloc))
+      # Select based only on current memory
+      def least_memory(num_avail):
+        mem_per_device = [0.0] * num_avail
+
+        for m in range(num_avail):
+          curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
+          mem_per_device[m] = curr_mem_alloc
+          #print("Device: %d, Curr Mem: %dMiB" %(m, curr_mem_alloc*9.5e-7))
+
+        return mem_per_device
+
+      def best_fit(self, batch_size, num_avail):
+        mem_per_device = [0.0] * num_avail
+
+        for m in range(num_avail):
+          curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
+          # TODO: error check!!
+          curr_mod_bsize_mem = (all_points[self._name])[batch_size]
+          mem_per_device[m] = curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem
+          #print("Device: %d, ModBSize: %d, Curr Mem: %dMiB, Total: %d" %(m, curr_mod_bsize_mem, curr_mem_alloc*9.5e-7, curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem))
+
+        return mem_per_device
+
+      # Track how much memory is being used on each device
+      mem_per_device = None
+      if batch_size == -1:
+        mem_per_device = least_memory(num_avail)
+      else:
+        mem_per_device = best_fit(self, batch_size, num_avail)
 
       # Set to minimum
       min_device = mem_per_device.index(min(mem_per_device))
@@ -265,7 +301,7 @@ class Module(object):
       print("Running on: %d" % min_device)
       return min_device
 
-    def cuda(self, device=None):
+    def cuda(self, device=None, batch_size=-1):
         r"""Moves all model parameters and buffers to the GPU.
 
         This also makes associated parameters and buffers different objects. So
@@ -278,10 +314,11 @@ class Module(object):
 
         Returns:
             Module: self
+            Optimal Batch Size: o_bsize
         """
 
         if device is None:
-          device = self.__select_gpu()
+          device = self.__select_gpu(batch_size)
 
         return self._apply(lambda t: t.cuda(device))
 
