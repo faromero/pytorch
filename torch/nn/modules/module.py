@@ -320,7 +320,9 @@ class Module(object):
       # Set to minimum
       torch._C._cuda_setDevice(min_device)
 
-      print("Running on: %d; Optimal Batch Size: %d" % (min_device, opt_bsize))
+      print("Model %s is running on: %d; Optimal Batch Size: %d" %
+            (self._name, min_device, opt_bsize))
+
       return min_device, opt_bsize
 
     def cuda(self, device=None, batch_size=-1):
