@@ -16,7 +16,16 @@ all_points = {'DenseNet201'   : {4 : 2275, 8 : 3109, 16 : 4699, 32 : 7839, 64 : 
               'ResNet50'      : {4 : 1799, 8 : 2149, 16 : 2837, 32 : 4139, 64 : 6737},
               'SqueezeNet1_1' : {4 : 936,  8 : 1156, 16 : 1318, 32 : 1636, 64 : 2314}}
 
+# Note that DenseNet201-64 is a very large value so it will never be picked
+all_points_stream = {'DenseNet201'   : {4 : 3087, 8 : 4895, 16 : 8049, 32 : 15369, 64 : 20000},
+                     'VGG19'         : {4 : 3185, 8 : 3229, 16 : 6307, 32 : 9629,  64 : 12869},
+                     'ResNet50'      : {4 : 2033, 8 : 2781, 16 : 4217, 32 : 6813,  64 : 12355},
+                     'SqueezeNet1_1' : {4 : 1647, 8 : 1797, 16 : 2075, 32 : 2797,  64 : 4127}}
+
 poss_batch = [4, 8, 16, 32, 64]
+
+# Should extract this from CUDA API
+max_memory = 16160
 
 def _addindent(s_, numSpaces):
     s = s_.split('\n')
@@ -257,7 +266,7 @@ class Module(object):
     # force model to wait...
 
     # Currently only based on memory, will expand to compute
-    def __select_gpu(self, batch_size):
+    def __select_gpu(self, batch_size, streaming):
       num_avail = torch._C._cuda_getDeviceCount()
 
       # If only one device, leave as is 
@@ -279,31 +288,54 @@ class Module(object):
 
         return mem_per_device.index(min(mem_per_device))
 
-      def best_fit_static(self, batch_size, num_avail):
+      def best_fit_static(self, batch_size, num_avail, streaming):
         mem_per_device = [0.0] * num_avail
 
         for m in range(num_avail):
           curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
           # TODO: error check!!
-          curr_mod_bsize_mem = (all_points[self._name])[batch_size]
+          if streaming:
+            curr_mod_bsize_mem = (all_points_stream[self._name])[batch_size]
+          else:
+            curr_mod_bsize_mem = (all_points[self._name])[batch_size]
           mem_per_device[m] = curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem
           #print("Device: %d, ModBSize: %d, Curr Mem: %dMiB, Total: %d" %(m, curr_mod_bsize_mem, curr_mem_alloc*9.5e-7, curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem))
 
         return mem_per_device.index(min(mem_per_device))
 
-      def best_fit_batch(self, num_avail):
+      def best_fit_batch(self, num_avail, streaming):
         mem_per_device = np.zeros((num_avail, len(poss_batch)), dtype=int)
 
         for m in range(num_avail):
           for n, b in enumerate(poss_batch):
             curr_mem_alloc = torch._C._cuda_gpuMemoryInfo(m)
             # TODO: error check!!
-            curr_mod_bsize_mem = (all_points[self._name])[b]
+            curr_mod_bsize_mem = None
+            if streaming:
+              curr_mod_bsize_mem = (all_points_stream[self._name])[b]
+            else:
+              curr_mod_bsize_mem = (all_points[self._name])[b]
             mem_per_device[m, n] = curr_mem_alloc*9.5e-7 + curr_mod_bsize_mem
 
-        min_tup = np.unravel_index(mem_per_device.argmin(), mem_per_device.shape)
+        min_tup = None
+        if streaming:
+          # Need to find the largest batch size that fits
+          mpd_flip = np.flip(mem_per_device, 1)
+          for i in range(mem_per_device.shape[1]):
+            if (mpd_flip[0,i] <= mpd_flip[1,i]) and (mpd_flip[0,i] < max_memory):
+              min_tup = (0, mpd_flip.shape[1] - i - 1)
+              break
+            elif (mpd_flip[0,i] > mem_per_device[1,i]) and (mpd_flip[1,i] < max_memory):
+              min_tup = (1, mpd_flip.shape[1] - i - 1)
+              break
+          if min_tup == None:
+              print("Min Tup == (0,0)!")
+              min_tup = (0,0)
 
-        return np.asscalar(min_tup[0]), poss_batch[min_tup[1]]
+          return min_tup[0], poss_batch[min_tup[1]]
+        else:
+          min_tup = np.unravel_index(mem_per_device.argmin(), mem_per_device.shape)
+          return np.asscalar(min_tup[0]), poss_batch[min_tup[1]]
 
       # Track how much memory is being used on each device
       min_device = -1
@@ -312,9 +344,9 @@ class Module(object):
       if batch_size == -2:
         min_device = least_memory(num_avail)
       elif batch_size == -1:
-        min_device, opt_bsize = best_fit_batch(self, num_avail)
+        min_device, opt_bsize = best_fit_batch(self, num_avail, streaming)
       else:
-        min_device = best_fit_static(self, batch_size, num_avail)
+        min_device = best_fit_static(self, batch_size, num_avail, streaming)
         opt_bsize = batch_size
 
       # Set to minimum
@@ -325,7 +357,7 @@ class Module(object):
 
       return min_device, opt_bsize
 
-    def cuda(self, device=None, batch_size=-1):
+    def cuda(self, device=None, batch_size=-1, streaming=False):
         r"""Moves all model parameters and buffers to the GPU.
 
         This also makes associated parameters and buffers different objects. So
@@ -349,7 +381,7 @@ class Module(object):
         """
         opt_bsize = -1
         if device == -1:
-          device, opt_bsize = self.__select_gpu(batch_size)
+          device, opt_bsize = self.__select_gpu(batch_size, streaming)
 
         return self._apply(lambda t: t.cuda(device)), opt_bsize
 
