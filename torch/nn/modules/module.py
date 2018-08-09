@@ -262,8 +262,8 @@ class Module(object):
 
       # If only one device, leave as is 
       if num_avail == 1:
-        print("Running on: %d" % min_device)
-        return 0
+        print("Running on: 0")
+        return 0, batch_size
 
       # Define different functions that can be used to decide how to select
       # a GPU
